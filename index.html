@@ -79,26 +79,55 @@
             const stored = localStorage.getItem('dnd-characters');
             if (stored) {
               const chars = JSON.parse(stored);
-              setCharacters(chars);
+              // Migrate old format to new format
+              const migratedChars = chars.map(char => {
+                if (!char.attackTypes) {
+                  return {
+                    name: char.name,
+                    attackTypes: [
+                      {
+                        name: 'Attack',
+                        count: char.numAttacks || 4,
+                        bonus: char.attackBonus || 10,
+                        damageDice: char.damageDice || '1d8+5',
+                        critRange: char.critRange || 20,
+                        critExtraDice: char.critExtraDice || ''
+                      }
+                    ]
+                  };
+                }
+                return char;
+              });
+              setCharacters(migratedChars);
             } else {
               const defaultChar = {
                 name: 'Character 1',
-                attackBonus: 10,
-                numAttacks: 4,
-                damageDice: '1d8+5',
-                critRange: 20,
-                critExtraDice: '1d10+2d8'
+                attackTypes: [
+                  {
+                    name: 'Attack',
+                    count: 4,
+                    bonus: 10,
+                    damageDice: '1d8+5',
+                    critRange: 20,
+                    critExtraDice: '1d10+2d8'
+                  }
+                ]
               };
               setCharacters([defaultChar]);
             }
           } catch (error) {
             const defaultChar = {
               name: 'Character 1',
-              attackBonus: 10,
-              numAttacks: 4,
-              damageDice: '1d8+5',
-              critRange: 20,
-              critExtraDice: '1d10+2d8'
+              attackTypes: [
+                {
+                  name: 'Attack',
+                  count: 4,
+                  bonus: 10,
+                  damageDice: '1d8+5',
+                  critRange: 20,
+                  critExtraDice: '1d10+2d8'
+                }
+              ]
             };
             setCharacters([defaultChar]);
           }
@@ -127,11 +156,16 @@
       const addCharacter = () => {
         const newChar = {
           name: `Character ${characters.length + 1}`,
-          attackBonus: 10,
-          numAttacks: 4,
-          damageDice: '1d8+5',
-          critRange: 20,
-          critExtraDice: ''
+          attackTypes: [
+            {
+              name: 'Attack',
+              count: 4,
+              bonus: 10,
+              damageDice: '1d8+5',
+              critRange: 20,
+              critExtraDice: ''
+            }
+          ]
         };
         setCharacters([...characters, newChar]);
         setActiveCharIndex(characters.length);
@@ -190,52 +224,73 @@
         if (!activeChar) return;
         
         const attacks = [];
+        let totalDamage = 0;
         
-        for (let i = 0; i < activeChar.numAttacks; i++) {
-          const attackRoll = Math.floor(Math.random() * 20) + 1;
-          const totalAttack = attackRoll + activeChar.attackBonus;
-          const isCrit = attackRoll >= activeChar.critRange;
-          
-          let damage = rollDamage(activeChar.damageDice);
-          
-          if (isCrit) {
-            const { dice, flat } = parseDice(activeChar.damageDice);
-            let critDamage = flat;
-            dice.forEach(({ num, sides }) => {
-              const rolls = rollDice(num, sides);
-              critDamage += rolls.reduce((a, b) => a + b, 0);
-            });
-            damage += critDamage;
+        // Roll all attacks from all attack types
+        activeChar.attackTypes.forEach(attackType => {
+          for (let i = 0; i < attackType.count; i++) {
+            const attackRoll = Math.floor(Math.random() * 20) + 1;
+             const isMiss = attackRoll === 1;
+             const totalAttack = isMiss ? -Infinity : attackRoll + attackType.bonus;
+             const isCrit = !isMiss && attackRoll >= attackType.critRange;
             
-            if (activeChar.critExtraDice) {
-              damage += rollDamage(activeChar.critExtraDice);
+             let damage = 0;
+            
+             if (!isMiss) {
+               damage = rollDamage(attackType.damageDice);
+             
+               if (isCrit) {
+              const { dice, flat } = parseDice(attackType.damageDice);
+              let critDamage = flat;
+              dice.forEach(({ num, sides }) => {
+                const rolls = rollDice(num, sides);
+                critDamage += rolls.reduce((a, b) => a + b, 0);
+              });
+              damage += critDamage;
+              
+              if (attackType.critExtraDice) {
+                damage += rollDamage(attackType.critExtraDice);
+              }
+               }
+             
+               totalDamage += damage;
             }
+            
+            attacks.push({
+              typeIndex: activeChar.attackTypes.indexOf(attackType),
+              typeName: attackType.name,
+              attackRoll,
+              totalAttack,
+              damage,
+               isCrit,
+               isMiss
+            });
           }
-          
-          attacks.push({
-            attackRoll,
-            totalAttack,
-            damage,
-            isCrit
-          });
-        }
+        });
         
-        attacks.sort((a, b) => a.totalAttack - b.totalAttack);
+         attacks.sort((a, b) => {
+           if (a.isMiss && b.isMiss) return 0;
+           if (a.isMiss) return 1;
+           if (b.isMiss) return -1;
+           return a.totalAttack - b.totalAttack;
+         });
         
         const thresholds = [];
-        const totalDamage = attacks.reduce((sum, a) => sum + a.damage, 0);
         let cumulativeDamage = totalDamage;
         
         attacks.forEach(attack => {
+           if (!attack.isMiss) {
           thresholds.push({
             ac: attack.totalAttack,
             damage: cumulativeDamage,
-            isCrit: attack.isCrit
+            isCrit: attack.isCrit,
+            typeName: attack.typeName
           });
           cumulativeDamage -= attack.damage;
+           }
         });
         
-        setResults({ attacks, thresholds });
+        setResults({ attacks, thresholds, totalDamage });
         setShowConfig(false);
       };
 
@@ -244,10 +299,36 @@
         
         const parts = results.thresholds.map((t, i) => {
           const critNote = t.isCrit ? ' (crit)' : '';
-          return `${t.damage} damage if ${t.ac} hits${critNote}`;
+          const typeNote = t.typeName ? ` [${t.typeName}]` : '';
+          return `${t.damage} damage if ${t.ac} hits${typeNote}${critNote}`;
         });
         
         return parts.join(', ');
+      };
+
+      const addAttackType = () => {
+        const newAttackTypes = [...activeChar.attackTypes];
+        newAttackTypes.push({
+          name: `Attack Type ${newAttackTypes.length + 1}`,
+          count: 1,
+          bonus: 0,
+          damageDice: '1d8',
+          critRange: 20,
+          critExtraDice: ''
+        });
+        updateActiveChar({ attackTypes: newAttackTypes });
+      };
+
+      const removeAttackType = (index) => {
+        if (activeChar.attackTypes.length === 1) return;
+        const newAttackTypes = activeChar.attackTypes.filter((_, i) => i !== index);
+        updateActiveChar({ attackTypes: newAttackTypes });
+      };
+
+      const updateAttackType = (index, updates) => {
+        const newAttackTypes = [...activeChar.attackTypes];
+        newAttackTypes[index] = { ...newAttackTypes[index], ...updates };
+        updateActiveChar({ attackTypes: newAttackTypes });
       };
 
       if (!activeChar) return <div className="min-h-screen bg-gradient-to-br from-red-900 via-gray-900 to-gray-800 flex items-center justify-center text-white">Loading...</div>;
@@ -321,64 +402,101 @@
                     />
                   </div>
 
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-1">
-                      Attack Bonus
-                    </label>
-                    <input
-                      type="number"
-                      value={activeChar.attackBonus}
-                      onChange={(e) => updateActiveChar({ attackBonus: parseInt(e.target.value) })}
-                      className="w-full px-3 py-2 bg-gray-700 text-white rounded border border-gray-600 focus:border-red-500 focus:outline-none"
-                    />
-                  </div>
+                  <div className="border-t border-gray-600 pt-4">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-semibold text-white">Attack Types</h3>
+                      <button
+                        onClick={addAttackType}
+                        className="px-2 py-1 bg-green-700 hover:bg-green-600 rounded text-white text-sm flex items-center gap-1"
+                      >
+                        <Plus size={14} />
+                        Add Attack Type
+                      </button>
+                    </div>
 
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-1">
-                      Number of Attacks
-                    </label>
-                    <input
-                      type="number"
-                      value={activeChar.numAttacks}
-                      onChange={(e) => updateActiveChar({ numAttacks: parseInt(e.target.value) })}
-                      className="w-full px-3 py-2 bg-gray-700 text-white rounded border border-gray-600 focus:border-red-500 focus:outline-none"
-                    />
-                  </div>
+                    {activeChar.attackTypes.map((attackType, typeIndex) => (
+                      <div key={typeIndex} className="mb-6 p-4 bg-gray-700 rounded-lg">
+                        <div className="flex items-center justify-between mb-3">
+                          <input
+                            type="text"
+                            value={attackType.name}
+                            onChange={(e) => updateAttackType(typeIndex, { name: e.target.value })}
+                            className="flex-1 px-2 py-1 bg-gray-600 text-white rounded border border-gray-500 focus:border-red-500 focus:outline-none text-sm font-medium"
+                          />
+                          {activeChar.attackTypes.length > 1 && (
+                            <button
+                              onClick={() => removeAttackType(typeIndex)}
+                              className="ml-2 p-1 bg-red-700 hover:bg-red-600 rounded transition-colors"
+                            >
+                              <Trash2 size={14} className="text-white" />
+                            </button>
+                          )}
+                        </div>
 
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-1">
-                      Damage Dice (e.g., "1d8+5" or "2d6+1d4+3")
-                    </label>
-                    <input
-                      type="text"
-                      value={activeChar.damageDice}
-                      onChange={(e) => updateActiveChar({ damageDice: e.target.value })}
-                      className="w-full px-3 py-2 bg-gray-700 text-white rounded border border-gray-600 focus:border-red-500 focus:outline-none"
-                    />
-                  </div>
+                        <div className="grid grid-cols-2 gap-3 mb-3">
+                          <div>
+                            <label className="block text-xs font-medium text-gray-300 mb-1">
+                              # of Attacks
+                            </label>
+                            <input
+                              type="number"
+                              min="1"
+                              value={attackType.count}
+                              onChange={(e) => updateAttackType(typeIndex, { count: parseInt(e.target.value) })}
+                              className="w-full px-2 py-1 bg-gray-600 text-white rounded border border-gray-500 focus:border-red-500 focus:outline-none text-sm"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-gray-300 mb-1">
+                              Attack Bonus
+                            </label>
+                            <input
+                              type="number"
+                              value={attackType.bonus}
+                              onChange={(e) => updateAttackType(typeIndex, { bonus: parseInt(e.target.value) })}
+                              className="w-full px-2 py-1 bg-gray-600 text-white rounded border border-gray-500 focus:border-red-500 focus:outline-none text-sm"
+                            />
+                          </div>
+                        </div>
 
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-1">
-                      Crit Range (minimum d20 roll to crit)
-                    </label>
-                    <input
-                      type="number"
-                      value={activeChar.critRange}
-                      onChange={(e) => updateActiveChar({ critRange: parseInt(e.target.value) })}
-                      className="w-full px-3 py-2 bg-gray-700 text-white rounded border border-gray-600 focus:border-red-500 focus:outline-none"
-                    />
-                  </div>
+                        <div className="mb-3">
+                          <label className="block text-xs font-medium text-gray-300 mb-1">
+                            Damage Dice (e.g., "1d8+5")
+                          </label>
+                          <input
+                            type="text"
+                            value={attackType.damageDice}
+                            onChange={(e) => updateAttackType(typeIndex, { damageDice: e.target.value })}
+                            className="w-full px-2 py-1 bg-gray-600 text-white rounded border border-gray-500 focus:border-red-500 focus:outline-none text-sm"
+                          />
+                        </div>
 
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-1">
-                      Extra Crit Dice (e.g., "1d10+12d8")
-                    </label>
-                    <input
-                      type="text"
-                      value={activeChar.critExtraDice}
-                      onChange={(e) => updateActiveChar({ critExtraDice: e.target.value })}
-                      className="w-full px-3 py-2 bg-gray-700 text-white rounded border border-gray-600 focus:border-red-500 focus:outline-none"
-                    />
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-medium text-gray-300 mb-1">
+                              Crit Range
+                            </label>
+                            <input
+                              type="number"
+                              value={attackType.critRange}
+                              onChange={(e) => updateAttackType(typeIndex, { critRange: parseInt(e.target.value) })}
+                              className="w-full px-2 py-1 bg-gray-600 text-white rounded border border-gray-500 focus:border-red-500 focus:outline-none text-sm"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-gray-300 mb-1">
+                              Extra Crit Dice
+                            </label>
+                            <input
+                              type="text"
+                              value={attackType.critExtraDice}
+                              onChange={(e) => updateAttackType(typeIndex, { critExtraDice: e.target.value })}
+                              className="w-full px-2 py-1 bg-gray-600 text-white rounded border border-gray-500 focus:border-red-500 focus:outline-none text-sm"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
@@ -397,23 +515,26 @@
                 <h2 className="text-xl font-bold text-white mb-4">Results for {activeChar.name}</h2>
                 
                 <div className="mb-6 p-4 bg-gray-700 rounded-lg">
-                  <h3 className="text-sm font-semibold text-gray-400 mb-2">Individual Attacks</h3>
+                  <h3 className="text-sm font-semibold text-gray-400 mb-3">Individual Attacks</h3>
                   <div className="space-y-2">
                     {results.attacks.map((attack, i) => (
-                      <div key={i} className="flex justify-between text-white">
-                        <span className={attack.isCrit ? 'text-yellow-400 font-bold' : ''}>
-                          Attack {i + 1}: d20={attack.attackRoll} → {attack.totalAttack} to hit
-                          {attack.isCrit && ' ⚡CRIT⚡'}
+                       <div key={i} className={`flex justify-between text-sm ${attack.isMiss ? 'bg-red-900 bg-opacity-50 p-2 rounded' : ''}`}>
+                         <span className={attack.isMiss ? 'text-red-300 font-bold' : attack.isCrit ? 'text-yellow-400 font-bold text-white' : 'text-white'}>
+                           Attack {i + 1} <span className="text-gray-400">[{attack.typeName}]</span>: d20={attack.attackRoll}
+                           {attack.isMiss ? ' → MISS ✗' : ` → ${attack.totalAttack} to hit${attack.isCrit ? ' ⚡CRIT⚡' : ''}`}
                         </span>
-                        <span className="font-mono">{attack.damage} dmg</span>
+                         <span className={`font-mono ${attack.isMiss ? 'text-red-300' : 'text-white'}`}>{attack.isMiss ? 'miss' : `${attack.damage} dmg`}</span>
                       </div>
                     ))}
+                  </div>
+                  <div className="mt-4 pt-4 border-t border-gray-600 text-white font-bold">
+                    Total Damage: <span className="text-green-400 text-lg">{results.totalDamage}</span>
                   </div>
                 </div>
 
                 <div className="p-4 bg-green-900 bg-opacity-30 border-2 border-green-500 rounded-lg">
                   <h3 className="text-sm font-semibold text-green-400 mb-2">DM Summary</h3>
-                  <p className="text-white font-mono text-sm leading-relaxed">
+                  <p className="text-white font-mono text-sm leading-relaxed break-words">
                     {formatOutput()}
                   </p>
                 </div>
