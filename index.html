@@ -596,7 +596,8 @@
                         damageDice: char.damageDice || '1d8+5',
                         critRange: char.critRange || 20,
                         smiteDice: '',
-                        brutalCritDice: char.critExtraDice || ''
+                        brutalCritDice: char.critExtraDice || '',
+                        advantage: false
                       }
                     ]
                   };
@@ -606,7 +607,8 @@
                   attackTypes: char.attackTypes.map(at => ({
                     ...at,
                     smiteDice: at.smiteDice ?? '',
-                    brutalCritDice: at.brutalCritDice ?? at.critExtraDice ?? ''
+                    brutalCritDice: at.brutalCritDice ?? at.critExtraDice ?? '',
+                    advantage: at.advantage ?? false
                   }))
                 };
               });
@@ -622,7 +624,8 @@
                     damageDice: '1d8+5',
                     critRange: 20,
                     smiteDice: '',
-                    brutalCritDice: '1d10+2d8'
+                    brutalCritDice: '1d10+2d8',
+                    advantage: false
                   }
                 ]
               };
@@ -639,7 +642,8 @@
                   damageDice: '1d8+5',
                   critRange: 20,
                   smiteDice: '',
-                  brutalCritDice: '1d10+2d8'
+                  brutalCritDice: '1d10+2d8',
+                  advantage: false
                 }
               ]
             };
@@ -686,7 +690,8 @@
               damageDice: '1d8+3',
               critRange: 20,
               smiteDice: '',
-              brutalCritDice: ''
+              brutalCritDice: '',
+              advantage: false
             }
           ]
         };
@@ -754,11 +759,14 @@
         };
         const d20Color = getD20Color();
         const rollOnce = (tag) => rollDie(20, `Attack d20${tag ? ` ${tag}` : ''}`, collector, d20Color);
-        if (attackMode === 'normal') return rollOnce();
+        if (attackMode === 'normal') {
+          const roll = rollOnce();
+          return { result: roll, rolls: [roll] };
+        }
         const first = rollOnce('(1)');
         const second = rollOnce('(2)');
-        if (attackMode === 'advantage') return Math.max(first, second);
-        return Math.min(first, second);
+        const result = attackMode === 'advantage' ? Math.max(first, second) : Math.min(first, second);
+        return { result, rolls: [first, second] };
       };
 
       // Damage dice color mapping - unique shades of blue
@@ -781,6 +789,18 @@
       // Brutal critical dice color - red
       const getBrutalColor = () => 0xdc2626; // red
 
+      // Determine effective attack mode based on per-attack advantage and global mode
+      const getEffectiveAttackMode = (attackAdvantage, globalMode) => {
+        // If attack has advantage and global is disadvantage, they cancel to normal
+        if (attackAdvantage && globalMode === 'disadvantage') return 'normal';
+        // If either attack has advantage OR global is advantage, use advantage
+        if (attackAdvantage || globalMode === 'advantage') return 'advantage';
+        // If attack doesn't have advantage and global is disadvantage, use disadvantage
+        if (!attackAdvantage && globalMode === 'disadvantage') return 'disadvantage';
+        // Otherwise normal
+        return 'normal';
+      };
+
       const performAttackSequence = () => {
         if (!activeChar) return;
         
@@ -792,7 +812,9 @@
         // Roll all attacks from all attack types
         activeChar.attackTypes.forEach(attackType => {
           for (let i = 0; i < attackType.count; i++) {
-            const attackRoll = rollD20(diceCollector, attackMode);
+            const effectiveMode = getEffectiveAttackMode(attackType.advantage, attackMode);
+            const d20Result = rollD20(diceCollector, effectiveMode);
+            const attackRoll = d20Result.result;
             const isMiss = attackRoll === 1;
             const totalAttack = isMiss ? -Infinity : attackRoll + attackType.bonus;
             const isCrit = !isMiss && attackRoll >= attackType.critRange;
@@ -825,6 +847,7 @@
               typeIndex: activeChar.attackTypes.indexOf(attackType),
               typeName: attackType.name,
               attackRoll,
+              d20Rolls: d20Result.rolls,
               totalAttack,
               damage,
               isCrit,
@@ -890,7 +913,8 @@
           damageDice: '1d8',
           critRange: 20,
           smiteDice: '',
-          brutalCritDice: ''
+          brutalCritDice: '',
+          advantage: false
         });
         updateActiveChar({ attackTypes: newAttackTypes });
       };
@@ -1061,6 +1085,18 @@
                         </div>
 
                         <div className="mb-3">
+                          <label className="flex items-center text-sm text-gray-300 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={attackType.advantage || false}
+                              onChange={(e) => updateAttackType(typeIndex, { advantage: e.target.checked })}
+                              className="mr-2 w-4 h-4 bg-gray-600 border-gray-500 rounded focus:ring-red-500"
+                            />
+                            Attack with Advantage
+                          </label>
+                        </div>
+
+                        <div className="mb-3">
                           <label className="block text-xs font-medium text-gray-300 mb-1">
                             Damage Dice (e.g., "1d8+5")
                           </label>
@@ -1137,15 +1173,20 @@
                 <div className="mb-6 p-4 bg-gray-700 rounded-lg">
                   <h3 className="text-sm font-semibold text-gray-400 mb-3">Individual Attacks</h3>
                   <div className="space-y-2">
-                    {results.attacks.map((attack, i) => (
+                    {results.attacks.map((attack, i) => {
+                      const rollDisplay = attack.d20Rolls?.length > 1 
+                        ? `(${attack.d20Rolls[0]}, ${attack.d20Rolls[1]})` 
+                        : attack.attackRoll;
+                      return (
                        <div key={i} className={`flex justify-between text-sm ${attack.isMiss ? 'bg-red-900 bg-opacity-50 p-2 rounded' : ''}`}>
                          <span className={attack.isMiss ? 'text-red-300 font-bold' : attack.isCrit ? 'text-yellow-400 font-bold text-white' : 'text-white'}>
-                           Attack {i + 1} <span className="text-gray-400">[{attack.typeName}]</span>: d20={attack.attackRoll}
+                           Attack {i + 1} <span className="text-gray-400">[{attack.typeName}]</span>: d20={rollDisplay}
                            {attack.isMiss ? ' → MISS ✗' : ` → ${attack.totalAttack} to hit${attack.isCrit ? ' ⚡CRIT⚡' : ''}`}
                         </span>
                          <span className={`font-mono ${attack.isMiss ? 'text-red-300' : 'text-white'}`}>{attack.isMiss ? 'miss' : `${attack.damage} dmg`}</span>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                   <div className="mt-4 pt-4 border-t border-gray-600 text-white font-bold">
                     Total Damage: <span className="text-green-400 text-lg">{results.totalDamage}</span>
